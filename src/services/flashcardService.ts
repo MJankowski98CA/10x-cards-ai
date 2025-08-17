@@ -1,153 +1,155 @@
-import { SupabaseClient } from '@supabase/supabase-js'
-import { Database } from '@/db/database.types'
-import { CreateFlashcardCommand, UpdateFlashcardCommand } from '@/types'
+import { createClient } from '@/lib/supabase/server'
+import {
+  FlashcardSearchParams,
+  UpdateFlashcardCommand,
+  CreateFlashcardCommand,
+} from '@/types'
 
-type FlashcardDto = Database['public']['Tables']['flashcards']['Row']
+export async function findById(id: number) {
+  const supabase = await createClient()
+  const {
+    data: { user },
+  } = await supabase.auth.getUser()
+  if (!user) throw new Error('Authentication required')
 
-interface GetFlashcardsOptions {
-  userId: string
-  status?: 'approved' | 'waiting_for_approval'
-  source?: 'AI' | 'MANUAL'
-  generation_id?: number
-  limit: number
-  offset: number
+  const { data, error } = await supabase
+    .from('flashcards')
+    .select('*')
+    .eq('id', id)
+    .eq('user_id', user.id)
+    .single()
+
+  if (error) {
+    if (error.code === 'PGRST116') {
+      return null
+    }
+    console.error(`Error fetching flashcard #${id}:`, error)
+    throw new Error('Failed to fetch flashcard')
+  }
+
+  return data
 }
 
-export class FlashcardService {
-  private supabase: SupabaseClient<Database>
+export async function create(command: CreateFlashcardCommand): Promise<void> {
+  const supabase = await createClient()
+  const {
+    data: { user },
+  } = await supabase.auth.getUser()
+  if (!user) throw new Error('Authentication required')
 
-  constructor(supabase: SupabaseClient<Database>) {
-    this.supabase = supabase
+  const { error } = await supabase.from('flashcards').insert({
+    ...command,
+    user_id: user.id,
+    source: 'manual',
+    status: 'approved',
+  })
+
+  if (error) {
+    console.error('Error creating flashcard:', error)
+    throw new Error('Failed to create flashcard')
+  }
+}
+
+export async function getFlashcards(params: FlashcardSearchParams) {
+  const supabase = await createClient()
+  const {
+    data: { user },
+  } = await supabase.auth.getUser()
+
+  if (!user) {
+    throw new Error('User not authenticated')
   }
 
-  public async getFlashcards(
-    options: GetFlashcardsOptions,
-  ): Promise<FlashcardDto[]> {
-    const { userId, status, source, generation_id, limit, offset } = options
+  const { view, source, page, limit } = params
+  const offset = (page - 1) * limit
 
-    let query = this.supabase
-      .from('flashcards')
-      .select('*')
-      .eq('user_id', userId)
+  let query = supabase
+    .from('flashcards')
+    .select('*', { count: 'exact' })
+    .eq('user_id', user.id)
+    .order('created_at', { ascending: false })
 
-    if (status) {
-      query = query.eq('status', status)
-    }
-
-    if (source) {
+  if (view === 'pending') {
+    query = query.eq('status', 'pending')
+  } else {
+    query = query.eq('status', 'approved')
+    if (source !== 'all') {
       query = query.eq('source', source)
     }
-
-    if (generation_id) {
-      query = query.eq('generation_id', generation_id)
-    }
-
-    query = query.range(offset, offset + limit - 1)
-
-    const { data, error } = await query
-
-    if (error) {
-      console.error('Error fetching flashcards from Supabase:', error)
-      throw new Error('Could not fetch flashcards.')
-    }
-
-    return data || []
   }
 
-  public async createFlashcard(
-    command: CreateFlashcardCommand,
-    userId: string,
-  ): Promise<FlashcardDto> {
-    const { front, back } = command
+  query = query.range(offset, offset + limit - 1)
 
-    const { data, error } = await this.supabase
-      .from('flashcards')
-      .insert({
-        front,
-        back,
-        user_id: userId,
-        status: 'approved',
-        source: 'MANUAL',
-      })
-      .select()
-      .single()
+  const { data, error, count } = await query
 
-    if (error) {
-      console.error('Error creating flashcard in Supabase:', error)
-      throw new Error('Could not create flashcard.')
-    }
-
-    return data
+  if (error) {
+    console.error('Error fetching flashcards:', error)
+    throw new Error('Could not fetch flashcards.')
   }
 
-  public async updateFlashcard(
-    id: number,
-    userId: string,
-    command: UpdateFlashcardCommand,
-  ): Promise<FlashcardDto> {
-    const existingFlashcard = await this.getFlashcardById(id, userId)
-    if (!existingFlashcard) {
-      throw new Error('Flashcard not found or user does not have permission.')
-    }
+  return {
+    flashcards: data || [],
+    totalCount: count || 0,
+  }
+}
 
-    const updateObject: Partial<UpdateFlashcardCommand> & {
-      is_edited?: boolean
-    } = {
-      ...command,
-    }
+export async function update(
+  id: number,
+  command: UpdateFlashcardCommand,
+): Promise<void> {
+  const supabase = await createClient()
+  const {
+    data: { user },
+  } = await supabase.auth.getUser()
+  if (!user) throw new Error('Authentication required')
 
-    if (existingFlashcard.source === 'AI' && (command.front || command.back)) {
-      updateObject.is_edited = true
-    }
+  const { data: existing } = await supabase
+    .from('flashcards')
+    .select('source')
+    .eq('id', id)
+    .eq('user_id', user.id)
+    .single()
 
-    const { data, error } = await this.supabase
-      .from('flashcards')
-      .update(updateObject)
-      .eq('id', id)
-      .select()
-      .single()
-
-    if (error) {
-      console.error('Error updating flashcard in Supabase:', error)
-      throw new Error('Could not update flashcard.')
-    }
-
-    return data
+  if (!existing) {
+    throw new Error('Flashcard not found')
   }
 
-  public async deleteFlashcard(id: number, userId: string): Promise<void> {
-    const { error, count } = await this.supabase
-      .from('flashcards')
-      .delete()
-      .eq('id', id)
-      .eq('user_id', userId)
-
-    if (error) {
-      console.error('Error deleting flashcard in Supabase:', error)
-      throw new Error('Could not delete flashcard.')
-    }
-
-    if (count === 0) {
-      throw new Error('Flashcard not found or user does not have permission.')
-    }
+  const updateObject: Record<string, unknown> = { ...command }
+  if (
+    existing.source === 'ai' &&
+    (command.front || command.back) &&
+    !command.status
+  ) {
+    updateObject.is_edited = true
   }
 
-  public async getFlashcardById(
-    id: number,
-    userId: string,
-  ): Promise<FlashcardDto | null> {
-    const { data, error } = await this.supabase
-      .from('flashcards')
-      .select('*')
-      .eq('id', id)
-      .eq('user_id', userId)
-      .single()
+  const { error } = await supabase
+    .from('flashcards')
+    .update(updateObject)
+    .eq('id', id)
+    .eq('user_id', user.id)
 
-    if (error && error.code !== 'PGRST116') {
-      console.error('Error fetching flashcard by id from Supabase:', error)
-      throw new Error('Could not fetch flashcard.')
-    }
+  if (error) {
+    console.error(`Error updating flashcard #${id}:`, error)
+    throw new Error('Failed to update flashcard')
+  }
+}
 
-    return data
+export async function remove(id: number): Promise<void> {
+  const supabase = await createClient()
+  const {
+    data: { user },
+  } = await supabase.auth.getUser()
+  if (!user) throw new Error('Authentication required')
+
+  const { error } = await supabase
+    .from('flashcards')
+    .delete()
+    .eq('id', id)
+    .eq('user_id', user.id)
+
+  if (error) {
+    console.error(`Error deleting flashcard #${id}:`, error)
+    throw new Error('Failed to delete flashcard')
   }
 }

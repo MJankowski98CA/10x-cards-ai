@@ -84,3 +84,21 @@ export type UpdateFlashcardCommand = Pick<
   TablesUpdate<'flashcards'>,
   'front' | 'back' | 'status'
 >
+
+// ============================================================================
+// View Models & Search Params
+//
+// These types represent validated and structured data used for rendering views,
+// often derived from URL search parameters.
+// ============================================================================
+
+/**
+ * Represents the validated search parameters for the main flashcards view.
+ * This is used on the server-side to fetch the correct data.
+ */
+export interface FlashcardSearchParams {
+  view: 'approved' | 'pending'
+  source: 'ai' | 'manual' | 'all'
+  page: number
+  limit: number
+}

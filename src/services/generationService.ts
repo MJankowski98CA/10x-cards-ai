@@ -46,8 +46,8 @@ export class GenerationService {
       ...fc,
       user_id: userId,
       generation_id: generation.id,
-      source: 'AI' as const,
-      status: 'waiting_for_approval' as const,
+      source: 'ai' as const,
+      status: 'pending' as const,
     }))
 
     // 3. Bulk insert flashcards
